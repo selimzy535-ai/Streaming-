@@ -1,6 +1,5 @@
 export default {
   async fetch(request, env, ctx) {
-    // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
@@ -23,13 +22,16 @@ export default {
 
       const token = BOT_TOKENS[parseInt(botId)||0] || BOT_TOKENS[0];
 
-      // KV cache file_path 3h
+      // KV cache file_path 3h - your logic good
       const kvKey = `tg_path:${file_id}`;
       let filePath = await env.STREAM_KV.get(kvKey);
       if (!filePath) {
-        const tgInfoRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${file_id}`);
+        const tgInfoRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(file_id)}`);
         const tgInfo = await tgInfoRes.json();
-        if (!tgInfo.ok) return new Response(JSON.stringify(tgInfo), {status:404});
+        if (!tgInfo.ok) {
+          await env.STREAM_KV.delete(kvKey);
+          return new Response(JSON.stringify(tgInfo), {status:404, headers:{'Access-Control-Allow-Origin':'*'}});
+        }
         filePath = tgInfo.result.file_path;
         ctx.waitUntil(env.STREAM_KV.put(kvKey, filePath, {expirationTtl:10800}));
       }
@@ -37,46 +39,31 @@ export default {
       const tgFileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
       const range = request.headers.get('Range');
 
-      const cache = caches.default;
-      const cacheKey = new Request(`${url.origin}/cache/${file_id}`, request);
-
-      // Only use cache for full file (no range)
-      if (!range) {
-        const cached = await cache.match(cacheKey);
-        if (cached) return cached;
-      }
-
       const originRes = await fetch(tgFileUrl, {
         headers: range? {Range: range} : {}
       });
 
       if (!originRes.ok) {
-        // clear bad KV
         await env.STREAM_KV.delete(kvKey);
-        return new Response('Upstream failed', {status:502});
+        return new Response('Upstream failed', {status:502, headers:{'Access-Control-Allow-Origin':'*'}});
       }
 
       const headers = new Headers();
-      // Force mp4 so Android ExoPlayer understands
-      headers.set('Content-Type', 'video/mp4');
+      // FIX 1: keep original type, not force mp4
+      const isImage = filePath.match(/\.(jpg|jpeg|png|webp)$/i);
+      headers.set('Content-Type', isImage? (isImage[0]==='.webp'?'image/webp':'image/jpeg') : 'video/mp4');
       headers.set('Accept-Ranges', 'bytes');
       headers.set('Access-Control-Allow-Origin', '*');
       headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
-      headers.set('Cache-Control', 'public, max-age=14400');
+      headers.set('Cache-Control', 'no-store'); // FIX 2: no CF cache for video
 
       if (originRes.headers.get('Content-Length')) headers.set('Content-Length', originRes.headers.get('Content-Length'));
       if (originRes.headers.get('Content-Range')) headers.set('Content-Range', originRes.headers.get('Content-Range'));
 
-      const res = new Response(originRes.body, {
-        status: originRes.status, // 200 or 206
+      return new Response(originRes.body, {
+        status: originRes.status,
         headers
       });
-
-      if (!range && originRes.status === 200) {
-        ctx.waitUntil(cache.put(cacheKey, res.clone()));
-      }
-
-      return res;
 
     } catch(e){
       return new Response(JSON.stringify({error:e.message}), {status:500, headers:{'Access-Control-Allow-Origin':'*'}});
