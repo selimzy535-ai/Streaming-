@@ -1,14 +1,24 @@
-// golviral-stream worker - new version
 export default {
   async fetch(request, env) {
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Range',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        }
+      });
+    }
+
     const { searchParams } = new URL(request.url);
-    let tgUrl = searchParams.get('src'); // direct https://api.telegram.org/file/bot.../path.mp4
+    let tgUrl = searchParams.get('src');
     const file_id = searchParams.get('file_id');
     const botId = searchParams.get('botId') || '0';
+    const postId = searchParams.get('postId') || ''; // add this to bust cache
 
     if (!tgUrl && file_id) {
-      // fallback old way
-      const token = env.BOT_TOKENS?.[parseInt(botId)] || env.BOT_TOKENS?.[0];
+      const tokens = (env.BOT_TOKENS || '').split(',').map(s=>s.trim()).filter(Boolean);
+      const token = tokens[parseInt(botId)] || tokens[0];
       if (!token) return new Response('BOT_TOKENS missing', {status:500});
       const info = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${file_id}`).then(r=>r.json());
       if (!info.ok) return new Response(JSON.stringify(info), {status:502});
@@ -17,17 +27,28 @@ export default {
     if (!tgUrl) return new Response(JSON.stringify({error:'src or file_id required'}), {status:400});
 
     const range = request.headers.get('Range');
-    const upstream = await fetch(tgUrl, { headers: range? {Range: range} : {} });
+    // IMPORTANT: bypass CF cache
+    const upstream = await fetch(tgUrl, {
+      headers: range? {Range: range} : {},
+      cf: { cacheEverything: false, cacheTtl: 0 }
+    });
 
     const h = new Headers();
-    h.set('Content-Type', 'video/mp4');
+    h.set('Content-Type', upstream.headers.get('Content-Type') || 'video/mp4');
     h.set('Accept-Ranges', 'bytes');
     h.set('Access-Control-Allow-Origin', '*');
-    h.set('Access-Control-Allow-Headers', 'Range');
-    h.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
-    h.set('Cache-Control', 'public, max-age=3600');
+    h.set('Access-Control-Allow-Headers', 'Range, Content-Type');
+    h.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
+    // FIX: NO STORE - this stops Android repeat
+    h.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    h.set('Pragma', 'no-cache');
+    h.set('CDN-Cache-Control', 'no-store');
+    h.set('Cloudflare-CDN-Cache-Control', 'no-store');
+
     if (upstream.headers.get('Content-Length')) h.set('Content-Length', upstream.headers.get('Content-Length'));
     if (upstream.headers.get('Content-Range')) h.set('Content-Range', upstream.headers.get('Content-Range'));
+    // Make each video unique in browser cache
+    if(postId) h.set('X-Post-Id', postId);
 
     return new Response(upstream.body, { status: upstream.status, headers: h });
   }
