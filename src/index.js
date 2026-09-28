@@ -1,72 +1,34 @@
+// golviral-stream worker - new version
 export default {
-  async fetch(request, env, ctx) {
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-          'Access-Control-Allow-Headers': 'Range, Content-Type',
-          'Access-Control-Max-Age': '86400'
-        }
-      });
+  async fetch(request, env) {
+    const { searchParams } = new URL(request.url);
+    let tgUrl = searchParams.get('src'); // direct https://api.telegram.org/file/bot.../path.mp4
+    const file_id = searchParams.get('file_id');
+    const botId = searchParams.get('botId') || '0';
+
+    if (!tgUrl && file_id) {
+      // fallback old way
+      const token = env.BOT_TOKENS?.[parseInt(botId)] || env.BOT_TOKENS?.[0];
+      if (!token) return new Response('BOT_TOKENS missing', {status:500});
+      const info = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${file_id}`).then(r=>r.json());
+      if (!info.ok) return new Response(JSON.stringify(info), {status:502});
+      tgUrl = `https://api.telegram.org/file/bot${token}/${info.result.file_path}`;
     }
+    if (!tgUrl) return new Response(JSON.stringify({error:'src or file_id required'}), {status:400});
 
-    try {
-      const url = new URL(request.url);
-      const file_id = url.searchParams.get('file_id');
-      const botId = url.searchParams.get('botId') || '0';
-      if (!file_id) return new Response(JSON.stringify({error:'file_id required'}), {status:400});
+    const range = request.headers.get('Range');
+    const upstream = await fetch(tgUrl, { headers: range? {Range: range} : {} });
 
-      const BOT_TOKENS = (env.BOT_TOKENS||'').split(',').map(s=>s.trim()).filter(Boolean);
-      if (!BOT_TOKENS.length) return new Response('BOT_TOKENS not set', {status:500});
+    const h = new Headers();
+    h.set('Content-Type', 'video/mp4');
+    h.set('Accept-Ranges', 'bytes');
+    h.set('Access-Control-Allow-Origin', '*');
+    h.set('Access-Control-Allow-Headers', 'Range');
+    h.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+    h.set('Cache-Control', 'public, max-age=3600');
+    if (upstream.headers.get('Content-Length')) h.set('Content-Length', upstream.headers.get('Content-Length'));
+    if (upstream.headers.get('Content-Range')) h.set('Content-Range', upstream.headers.get('Content-Range'));
 
-      const token = BOT_TOKENS[parseInt(botId)||0] || BOT_TOKENS[0];
-
-      // KV cache file_path 3h - your logic good
-      const kvKey = `tg_path:${file_id}`;
-      let filePath = await env.STREAM_KV.get(kvKey);
-      if (!filePath) {
-        const tgInfoRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(file_id)}`);
-        const tgInfo = await tgInfoRes.json();
-        if (!tgInfo.ok) {
-          await env.STREAM_KV.delete(kvKey);
-          return new Response(JSON.stringify(tgInfo), {status:404, headers:{'Access-Control-Allow-Origin':'*'}});
-        }
-        filePath = tgInfo.result.file_path;
-        ctx.waitUntil(env.STREAM_KV.put(kvKey, filePath, {expirationTtl:10800}));
-      }
-
-      const tgFileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
-      const range = request.headers.get('Range');
-
-      const originRes = await fetch(tgFileUrl, {
-        headers: range? {Range: range} : {}
-      });
-
-      if (!originRes.ok) {
-        await env.STREAM_KV.delete(kvKey);
-        return new Response('Upstream failed', {status:502, headers:{'Access-Control-Allow-Origin':'*'}});
-      }
-
-      const headers = new Headers();
-      // FIX 1: keep original type, not force mp4
-      const isImage = filePath.match(/\.(jpg|jpeg|png|webp)$/i);
-      headers.set('Content-Type', isImage? (isImage[0]==='.webp'?'image/webp':'image/jpeg') : 'video/mp4');
-      headers.set('Accept-Ranges', 'bytes');
-      headers.set('Access-Control-Allow-Origin', '*');
-      headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
-      headers.set('Cache-Control', 'no-store'); // FIX 2: no CF cache for video
-
-      if (originRes.headers.get('Content-Length')) headers.set('Content-Length', originRes.headers.get('Content-Length'));
-      if (originRes.headers.get('Content-Range')) headers.set('Content-Range', originRes.headers.get('Content-Range'));
-
-      return new Response(originRes.body, {
-        status: originRes.status,
-        headers
-      });
-
-    } catch(e){
-      return new Response(JSON.stringify({error:e.message}), {status:500, headers:{'Access-Control-Allow-Origin':'*'}});
-    }
+    return new Response(upstream.body, { status: upstream.status, headers: h });
   }
 }
