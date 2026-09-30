@@ -14,6 +14,7 @@ export default {
     let tgUrl = searchParams.get('src');
     const file_id = searchParams.get('file_id');
     const botId = searchParams.get('botId') || '0';
+    const postId = searchParams.get('postId') || ''; // add this to bust cache
 
     if (!tgUrl && file_id) {
       const tokens = (env.BOT_TOKENS || '').split(',').map(s=>s.trim()).filter(Boolean);
@@ -26,6 +27,7 @@ export default {
     if (!tgUrl) return new Response(JSON.stringify({error:'src or file_id required'}), {status:400});
 
     const range = request.headers.get('Range');
+    // IMPORTANT: bypass CF cache
     const upstream = await fetch(tgUrl, {
       headers: range? {Range: range} : {},
       cf: { cacheEverything: false, cacheTtl: 0 }
@@ -37,6 +39,7 @@ export default {
     h.set('Access-Control-Allow-Origin', '*');
     h.set('Access-Control-Allow-Headers', 'Range, Content-Type');
     h.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
+    // FIX: NO STORE - this stops Android repeat
     h.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     h.set('Pragma', 'no-cache');
     h.set('CDN-Cache-Control', 'no-store');
@@ -44,6 +47,8 @@ export default {
 
     if (upstream.headers.get('Content-Length')) h.set('Content-Length', upstream.headers.get('Content-Length'));
     if (upstream.headers.get('Content-Range')) h.set('Content-Range', upstream.headers.get('Content-Range'));
+    // Make each video unique in browser cache
+    if(postId) h.set('X-Post-Id', postId);
 
     return new Response(upstream.body, { status: upstream.status, headers: h });
   }
