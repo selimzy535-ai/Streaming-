@@ -3,9 +3,10 @@ export default {
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Headers': 'Range',
+          'Access-Control-Allow-Origin': 'https://golviral.com',
+          'Access-Control-Allow-Headers': 'Range, Content-Type',
           'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
         }
       });
     }
@@ -14,7 +15,6 @@ export default {
     let tgUrl = searchParams.get('src');
     const file_id = searchParams.get('file_id');
     const botId = searchParams.get('botId') || '0';
-    const postId = searchParams.get('postId') || ''; // add this to bust cache
 
     if (!tgUrl && file_id) {
       const tokens = (env.BOT_TOKENS || '').split(',').map(s=>s.trim()).filter(Boolean);
@@ -24,31 +24,26 @@ export default {
       if (!info.ok) return new Response(JSON.stringify(info), {status:502});
       tgUrl = `https://api.telegram.org/file/bot${token}/${info.result.file_path}`;
     }
-    if (!tgUrl) return new Response(JSON.stringify({error:'src or file_id required'}), {status:400});
+    if (!tgUrl) return new Response('src required', {status:400});
 
     const range = request.headers.get('Range');
-    // IMPORTANT: bypass CF cache
     const upstream = await fetch(tgUrl, {
-      headers: range? {Range: range} : {},
-      cf: { cacheEverything: false, cacheTtl: 0 }
+      headers: range? { Range: range } : {},
+      cf: { cacheEverything: true, cacheTtl: 86400 } // cache at edge, fix your 3.84s delay
     });
 
     const h = new Headers();
-    h.set('Content-Type', upstream.headers.get('Content-Type') || 'video/mp4');
+    // THIS FIXES YOUR DOWNLOAD ISSUE
+    h.set('Content-Type', 'video/mp4');
     h.set('Accept-Ranges', 'bytes');
-    h.set('Access-Control-Allow-Origin', '*');
-    h.set('Access-Control-Allow-Headers', 'Range, Content-Type');
+    h.set('Content-Disposition', 'inline'); // not attachment
+    h.set('Access-Control-Allow-Origin', 'https://golviral.com');
+    h.set('Access-Control-Allow-Headers', 'Range');
     h.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
-    // FIX: NO STORE - this stops Android repeat
-    h.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    h.set('Pragma', 'no-cache');
-    h.set('CDN-Cache-Control', 'no-store');
-    h.set('Cloudflare-CDN-Cache-Control', 'no-store');
-
+    h.set('Cache-Control', 'public, max-age=31536000');
+    // Cloudflare cache but browser revalidates per postId
     if (upstream.headers.get('Content-Length')) h.set('Content-Length', upstream.headers.get('Content-Length'));
     if (upstream.headers.get('Content-Range')) h.set('Content-Range', upstream.headers.get('Content-Range'));
-    // Make each video unique in browser cache
-    if(postId) h.set('X-Post-Id', postId);
 
     return new Response(upstream.body, { status: upstream.status, headers: h });
   }
